@@ -1,0 +1,47 @@
+# Compose di produzione: lo copia e lo avvia la pipeline sulla VPS.
+# Le variabili vengono da .env (creato una volta a mano, vedi deploy/README.md)
+# e da IMAGE_TAG, passato dal deploy.
+
+services:
+  manager:
+    image: ${IMAGE:-ghcr.io/aleeb/minecraft-server-manager}:${IMAGE_TAG:-latest}
+    container_name: mc-manager
+    restart: unless-stopped
+    # Rete dell'host: il manager vede le porte davvero libere e i server Minecraft
+    # restano raggiungibili anche durante i suoi aggiornamenti.
+    network_mode: host
+    environment:
+      HOST: ${MANAGER_HOST:-0.0.0.0}
+      PORT: ${MANAGER_PORT:-8080}
+      MANAGER_USER: ${MANAGER_USER:-admin}
+      MANAGER_PASSWORD: ${MANAGER_PASSWORD:?Imposta MANAGER_PASSWORD in .env}
+      SERVERS_DIR: ${SERVERS_DIR:-/srv/minecraft/servers}
+      MEMORY_RESERVE: ${MEMORY_RESERVE:-1g}
+      HEAP_SHARE: ${HEAP_SHARE:-0.8}
+      RAM_BUDGET: ${RAM_BUDGET:-}
+      RESTART_WARNING: ${RESTART_WARNING:-60}
+      TZ: ${TZ:-Europe/Rome}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Stesso percorso dentro e fuori: Docker monta le cartelle dei server dal percorso dell'host.
+      - ${SERVERS_DIR:-/srv/minecraft/servers}:${SERVERS_DIR:-/srv/minecraft/servers}
+
+  # HTTPS automatico con Let's Encrypt. Si attiva con COMPOSE_PROFILES=https e DOMAIN in .env.
+  # In quel caso imposta MANAGER_HOST=127.0.0.1 così il manager è raggiungibile solo tramite Caddy.
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: mc-manager-caddy
+    profiles: ["https"]
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      DOMAIN: ${DOMAIN:-}
+      MANAGER_PORT: ${MANAGER_PORT:-8080}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

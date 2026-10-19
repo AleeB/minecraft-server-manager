@@ -3,6 +3,7 @@
 // tramite il socket unix e serve il frontend statico in ./public.
 
 const http = require('http');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -13,6 +14,9 @@ const PORT = Number(process.env.PORT) || 8080;
 const HOST = process.env.HOST || '127.0.0.1';
 const SERVERS_DIR = path.resolve(process.env.SERVERS_DIR || path.join(ROOT, 'servers'));
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const AUTH_USER = process.env.MANAGER_USER || 'admin';
+const AUTH_PASSWORD = process.env.MANAGER_PASSWORD || '';
+const LOCAL_HOSTS = ['127.0.0.1', 'localhost', '::1'];
 const IMAGE = 'itzg/minecraft-server';
 const LABEL_MANAGED = 'mcm.managed';
 const LABEL_CONFIG = 'mcm.config';
@@ -820,7 +824,37 @@ async function route(req, res) {
   sendJson(res, 404, { error: `Endpoint non trovato: ${req.method} ${p}` });
 }
 
+function sameSecret(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a)).digest();
+  const hb = crypto.createHash('sha256').update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+function authorized(req) {
+  if (!AUTH_PASSWORD) return true;
+  const m = (req.headers.authorization || '').match(/^Basic\s+(.+)$/i);
+  if (!m) return false;
+  const decoded = Buffer.from(m[1], 'base64').toString('utf8');
+  const i = decoded.indexOf(':');
+  if (i < 0) return false;
+  // Confronta entrambi sempre, per non rivelare quale dei due è sbagliato.
+  const userOk = sameSecret(decoded.slice(0, i), AUTH_USER);
+  const passOk = sameSecret(decoded.slice(i + 1), AUTH_PASSWORD);
+  return userOk && passOk;
+}
+
+if (!AUTH_PASSWORD && !LOCAL_HOSTS.includes(HOST)) {
+  console.error(`Rifiuto di ascoltare su ${HOST} senza password: chi raggiunge il manager controlla Docker.`);
+  console.error('Imposta MANAGER_PASSWORD (e opzionalmente MANAGER_USER) oppure HOST=127.0.0.1.');
+  process.exit(1);
+}
+
 const server = http.createServer((req, res) => {
+  if (req.url === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
+  if (!authorized(req)) {
+    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Minecraft Server Manager", charset="UTF-8"', 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('Autenticazione richiesta');
+  }
   route(req, res).catch((e) => {
     if (res.headersSent) { try { res.end(); } catch { /* ignora */ } return; }
     sendJson(res, e.status || 500, { error: e.message });
@@ -831,4 +865,13 @@ server.listen(PORT, HOST, () => {
   console.log(`Minecraft Server Manager → http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
   console.log(`Socket Docker: ${findSocket()}`);
   console.log(`Cartella dati server: ${SERVERS_DIR}`);
+  console.log(AUTH_PASSWORD ? `Accesso protetto da password (utente "${AUTH_USER}")` : 'Accesso senza password (solo locale)');
 });
+
+// In container Node è il PID 1: chiude in modo pulito quando Docker manda SIGTERM.
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  });
+}

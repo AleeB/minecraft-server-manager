@@ -19,6 +19,8 @@ Poi apri http://localhost:8080.
 | `HOST`        | `127.0.0.1`                | Interfaccia di ascolto (vedi Sicurezza)      |
 | `SERVERS_DIR` | `<progetto>/servers`       | Dove vengono create le cartelle dei server   |
 | `DOCKER_HOST` | rilevato in automatico     | Socket Docker, es. `unix:///var/run/docker.sock` |
+| `MANAGER_USER` | `admin`                   | Utente per l'accesso (Basic Auth)            |
+| `MANAGER_PASSWORD` | vuota                 | Se impostata, l'interfaccia chiede la password |
 | `MEMORY_RESERVE` | `1g`                    | RAM di Docker lasciata al sistema            |
 | `HEAP_SHARE`  | `0.8`                      | Quota della RAM restante usabile come heap Java |
 | `RAM_BUDGET`  | calcolato                  | Forza il budget heap totale (es. `6g`)       |
@@ -45,5 +47,18 @@ I container già esistenti con l'immagine itzg (es. quello di `docker-compose.ym
 
 ## Sicurezza
 
-Chi raggiunge l'interfaccia controlla Docker sul tuo computer. Per questo di default ascolta solo
-su `127.0.0.1`. Non impostare `HOST=0.0.0.0` su una rete di cui non ti fidi.
+Chi raggiunge l'interfaccia controlla Docker sulla macchina. Di default ascolta solo su `127.0.0.1`;
+per ascoltare su un altro indirizzo (es. `HOST=0.0.0.0`) il manager **richiede** `MANAGER_PASSWORD`,
+altrimenti non parte. In produzione usalo dietro HTTPS (vedi [deploy/README.md](../deploy/README.md)).
+
+## Test
+
+```bash
+cd manager && npm test
+```
+
+I test avviano il manager contro un finto Docker ([test/fake-docker.js](test/fake-docker.js)), quindi non serve Docker.
+
+## Produzione
+
+Immagine Docker, compose di produzione e pipeline CI/CD: vedi [deploy/README.md](../deploy/README.md).
