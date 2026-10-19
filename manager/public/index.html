@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minecraft Server Manager</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M32 4 58 18v28L32 60 6 46V18Z' fill='%2379553a'/%3E%3Cpath d='M32 4 58 18 32 32 6 18Z' fill='%236cbf3f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span id="brand-mark" class="brand-mark"></span>
+      <div>
+        <h1>Server Manager</h1>
+        <span class="muted">Minecraft su Docker</span>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="docker-status" class="pill"><i class="dot"></i>Connessione…</span>
+      <button id="new-server" class="btn primary" type="button">Nuovo server</button>
+    </div>
+  </header>
+
+  <div id="docker-banner" class="banner" hidden></div>
+
+  <main class="page">
+    <section id="summary" class="summary" aria-label="Riepilogo"></section>
+
+    <section class="toolbar" aria-label="Azioni">
+      <label class="check select-all">
+        <input id="select-all" type="checkbox">
+        <span id="bulk-count">Seleziona</span>
+      </label>
+      <div class="bulk">
+        <button class="btn small" type="button" data-bulk="start" disabled>Avvia</button>
+        <button class="btn small" type="button" data-bulk="stop" disabled>Ferma</button>
+        <button class="btn small" type="button" data-bulk="restart" disabled>Riavvia</button>
+        <button class="btn small danger-soft" type="button" data-bulk="delete" disabled>Elimina</button>
+      </div>
+      <span class="spacer"></span>
+      <div class="filters" role="group" aria-label="Filtro stato">
+        <button type="button" data-filter="all" aria-pressed="true">Tutti</button>
+        <button type="button" data-filter="running" aria-pressed="false">Attivi</button>
+        <button type="button" data-filter="stopped" aria-pressed="false">Fermi</button>
+      </div>
+      <div class="search-wrap">
+        <span id="search-ico"></span>
+        <input id="search" class="input" type="search" placeholder="Cerca server…">
+      </div>
+    </section>
+
+    <section id="grid" class="grid" aria-live="polite"></section>
+  </main>
+
+  <div id="toasts" class="toasts"></div>
+
+  <script src="schema.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

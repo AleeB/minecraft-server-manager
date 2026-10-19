@@ -1,0 +1,14 @@
+# Dati dei server Minecraft (mondi, config con password RCON)
+data/
+servers/
+
+# Setup locale non gestito dal manager
+docker-compose.yml
+
+# Sistema / editor
+.DS_Store
+node_modules/
+*.log
+.env
+.env.*
+!.env.example

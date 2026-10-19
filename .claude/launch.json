@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mc-manager",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["manager/server.js"],
+      "port": 8080
+    }
+  ]
+}
