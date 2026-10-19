@@ -1,10 +1,12 @@
-# Compose di produzione: lo copia e lo avvia la pipeline sulla VPS.
-# Le variabili vengono da .env (creato una volta a mano, vedi deploy/README.md)
-# e da IMAGE_TAG, passato dal deploy.
+# Compose di produzione. Si usa dalla copia del repository sul server:
+#   cd /opt/mc-manager/deploy && ./update.sh
+# Le variabili vengono da deploy/.env (creato una volta a mano, vedi deploy/README.md).
 
 services:
   manager:
+    # Di default scarica l'immagine testata dalla CI; con "./update.sh --build" la costruisce sul server.
     image: ${IMAGE:-ghcr.io/aleeb/minecraft-server-manager}:${IMAGE_TAG:-latest}
+    build: ../manager
     container_name: mc-manager
     restart: unless-stopped
     # Rete dell'host: il manager vede le porte davvero libere e i server Minecraft
