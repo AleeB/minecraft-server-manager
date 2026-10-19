@@ -49,7 +49,8 @@ I container già esistenti con l'immagine itzg (es. quello di `docker-compose.ym
 
 Chi raggiunge l'interfaccia controlla Docker sulla macchina. Di default ascolta solo su `127.0.0.1`;
 per ascoltare su un altro indirizzo (es. `HOST=0.0.0.0`) il manager **richiede** `MANAGER_PASSWORD`,
-altrimenti non parte. In produzione usalo dietro HTTPS (vedi [deploy/README.md](../deploy/README.md)).
+altrimenti non parte. In produzione usalo dietro HTTPS: nginx e Let's Encrypt sono già pronti nel profilo `https`
+(vedi [deploy/README.md](../deploy/README.md)).
 
 ## Test
 

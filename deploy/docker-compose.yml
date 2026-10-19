@@ -26,22 +26,47 @@ services:
       # Stesso percorso dentro e fuori: Docker monta le cartelle dei server dal percorso dell'host.
       - ${SERVERS_DIR:-/srv/minecraft/servers}:${SERVERS_DIR:-/srv/minecraft/servers}
 
-  # HTTPS automatico con Let's Encrypt. Si attiva con COMPOSE_PROFILES=https e DOMAIN in .env.
-  # In quel caso imposta MANAGER_HOST=127.0.0.1 così il manager è raggiungibile solo tramite Caddy.
-  caddy:
-    image: caddy:2.8-alpine
-    container_name: mc-manager-caddy
+  # HTTPS: nginx come reverse proxy + certbot per i certificati Let's Encrypt.
+  # Si attivano con COMPOSE_PROFILES=https in .env (servono DOMAIN e LETSENCRYPT_EMAIL).
+  # In quel caso imposta MANAGER_HOST=127.0.0.1: il manager sarà raggiungibile solo tramite nginx.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: mc-manager-nginx
     profiles: ["https"]
     restart: unless-stopped
     network_mode: host
     environment:
       DOMAIN: ${DOMAIN:-}
       MANAGER_PORT: ${MANAGER_PORT:-8080}
+    entrypoint: ["sh", "/etc/nginx/mc/start.sh"]
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      - ./nginx:/etc/nginx/mc:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot-webroot:/var/www/certbot:ro
+    healthcheck:
+      test: ["CMD", "nginx", "-t", "-q"]
+      interval: 1m
+      timeout: 5s
+
+  # Bot che ottiene il certificato e lo rinnova (controllo ogni 12 ore).
+  certbot:
+    image: certbot/certbot:v2.11.0
+    container_name: mc-manager-certbot
+    profiles: ["https"]
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - nginx
+    environment:
+      DOMAIN: ${DOMAIN:-}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:-}
+      LETSENCRYPT_STAGING: ${LETSENCRYPT_STAGING:-0}
+    entrypoint: ["sh", "/opt/certbot/run.sh"]
+    volumes:
+      - ./certbot/run.sh:/opt/certbot/run.sh:ro
+      - letsencrypt:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
 
 volumes:
-  caddy-data:
-  caddy-config:
+  letsencrypt:
+  certbot-webroot:

@@ -1,0 +1,15 @@
+# Usata finché il certificato non esiste: serve solo la challenge di Let's Encrypt.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        default_type text/plain;
+        return 503 "Certificato HTTPS in preparazione, riprova tra qualche minuto.\n";
+    }
+}

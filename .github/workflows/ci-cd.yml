@@ -30,9 +30,27 @@ jobs:
       - name: Test
         run: npm test
 
+  nginx:
+    name: Verifica configurazione nginx
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Script di avvio
+        run: sh -n deploy/nginx/start.sh && sh -n deploy/certbot/run.sh
+      - name: nginx -t (senza certificato e con certificato di prova)
+        run: |
+          mkdir -p /tmp/le/live/test.example.com /tmp/empty
+          openssl req -x509 -nodes -newkey rsa:2048 -days 1 -subj "/CN=test.example.com" \
+            -keyout /tmp/le/live/test.example.com/privkey.pem -out /tmp/le/live/test.example.com/fullchain.pem
+          for certs in /tmp/empty /tmp/le; do
+            docker run --rm -e DOMAIN=test.example.com -e MANAGER_PORT=8080 \
+              -v "$PWD/deploy/nginx:/etc/nginx/mc:ro" -v "$certs:/etc/letsencrypt:ro" \
+              --entrypoint sh nginx:1.27-alpine /etc/nginx/mc/start.sh check
+          done
+
   build:
     name: Build immagine
-    needs: test
+    needs: [test, nginx]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -101,7 +119,7 @@ jobs:
       - name: Copia i file di deploy
         run: |
           ssh prod "mkdir -p '$DEPLOY_DIR'"
-          scp deploy/docker-compose.yml deploy/Caddyfile "prod:$DEPLOY_DIR/"
+          scp -r deploy/docker-compose.yml deploy/nginx deploy/certbot "prod:$DEPLOY_DIR/"
           ssh prod "test -f '$DEPLOY_DIR/.env'" || { echo "::error::Manca $DEPLOY_DIR/.env sulla VPS (copia deploy/.env.example e imposta MANAGER_PASSWORD)"; exit 1; }
 
       - name: Aggiorna il manager
@@ -113,6 +131,7 @@ jobs:
             export IMAGE='${{ env.IMAGE }}' IMAGE_TAG='${{ github.sha }}' && \
             docker compose pull && \
             docker compose up -d --remove-orphans && \
+            if docker compose config --services | grep -qx nginx; then docker compose exec -T nginx sh /etc/nginx/mc/start.sh reload; fi && \
             docker logout ghcr.io && \
             docker image prune -f"
 
