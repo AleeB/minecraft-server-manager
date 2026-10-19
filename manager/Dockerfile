@@ -1,5 +1,8 @@
 FROM node:22-alpine
 
+# zip/unzip per importare ed esportare i mondi
+RUN apk add --no-cache zip unzip
+
 WORKDIR /app
 COPY package.json server.js ./
 COPY public ./public

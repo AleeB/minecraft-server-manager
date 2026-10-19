@@ -59,6 +59,9 @@ const ICONS = {
   reset: '<path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 4v5h5"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
   send: '<path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/>',
+  world: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20"/>',
+  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
 };
 
 function icon(name, cls = '') {
@@ -326,7 +329,7 @@ function serverCard(s) {
           h('span', { class: 'chip type' }, s.type),
           h('span', { class: 'chip' }, s.version),
           !s.managed && h('span', { class: 'chip warn', title: 'Container non creato da questo manager: puoi avviarlo, fermarlo e duplicarlo, ma non modificarlo.' }, s.compose ? `compose · ${s.compose}` : 'esterno'))),
-      h('span', { class: `badge ${st.key}` }, busy ? h('span', { class: 'spinner tiny' }) : h('i', { class: 'dot' }), st.label)),
+      h('span', { class: `badge ${st.key}` }, busy || s.importing ? h('span', { class: 'spinner tiny' }) : h('i', { class: 'dot' }), s.importing ? 'Importazione mondo…' : st.label)),
     s.motd ? h('p', { class: 'motd', title: s.motd }, stripMcCodes(s.motd)) : h('p', { class: 'motd muted' }, 'Nessun MOTD'),
     h('dl', { class: 'facts' },
       h('div', {}, h('dt', {}, 'Indirizzo'), h('dd', {}, address
@@ -351,6 +354,7 @@ function serverCard(s) {
       btn('', { icon: 'restart', kind: 'icon-only', title: 'Riavvia', disabled: busy || !running, onClick: () => runAction(s, 'restart') }),
       btn('Console', { icon: 'terminal', disabled: busy, onClick: () => openConsole(s) }),
       h('span', { class: 'spacer' }),
+      btn('', { icon: 'world', kind: 'icon-only', title: s.managed ? 'Mondo: importa o scarica' : 'Non gestito dal manager', disabled: busy || !s.managed, onClick: () => openWorldDialog(s) }),
       btn('', { icon: 'edit', kind: 'icon-only', title: s.managed ? 'Modifica impostazioni' : 'Non gestito dal manager: usa Duplica', disabled: busy || !s.managed, onClick: () => openEditor({ mode: 'edit', server: s }) }),
       btn('', { icon: 'copy', kind: 'icon-only', title: 'Duplica', disabled: busy, onClick: () => openEditor({ mode: 'create', from: s }) }),
       btn('', { icon: 'trash', kind: 'icon-only danger', title: 'Elimina', disabled: busy, onClick: () => confirmDelete([s]) })),
@@ -902,6 +906,142 @@ function progressModal(title) {
       closeBtn.focus();
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Mondo: importazione da .zip e download
+// ---------------------------------------------------------------------------
+
+const FORMAT_LABEL = { vanilla: 'Vanilla (Nether ed End dentro il mondo)', paper: 'Paper/Spigot (Nether ed End separati)', 'solo-overworld': 'solo Overworld' };
+
+function openWorldDialog(initial) {
+  let s = initial;
+  let file = null;
+  let xhr = null;
+  const maxBytes = state.meta?.worldUploadMax || 2 * 1024 ** 3;
+  const running = isRunning(s);
+
+  const fileInput = h('input', { type: 'file', accept: '.zip,application/zip', hidden: true, onchange: (e) => pick(e.target.files[0]) });
+  const fileInfo = h('div', { class: 'file-info', hidden: true });
+  const progressFill = h('div', { class: 'meter-fill' });
+  const progressText = h('span', { class: 'mono' });
+  const progress = h('div', { class: 'upload-progress', hidden: true },
+    h('div', { class: 'meter-top' }, h('span', {}, 'Caricamento'), progressText),
+    h('div', { class: 'meter-track' }, progressFill));
+  const result = h('div', { class: 'world-result', hidden: true });
+  const importBtn = btn('Importa mondo', { icon: 'upload', kind: 'primary', disabled: true, onClick: doImport });
+
+  const drop = h('div', {
+    class: `dropzone${running ? ' disabled' : ''}`, tabindex: running ? '-1' : '0', role: 'button',
+    'aria-label': 'Scegli lo zip del mondo',
+    onclick: () => { if (!running && !xhr) fileInput.click(); },
+    onkeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && !running && !xhr) { e.preventDefault(); fileInput.click(); } },
+    ondragover: (e) => { e.preventDefault(); if (!running) drop.classList.add('over'); },
+    ondragleave: () => drop.classList.remove('over'),
+    ondrop: (e) => { e.preventDefault(); drop.classList.remove('over'); if (!running && !xhr) pick(e.dataTransfer.files[0]); },
+  }, icon('upload', 'big'), h('strong', {}, 'Trascina qui lo .zip del mondo'), h('span', { class: 'muted' }, `oppure clicca per sceglierlo · max ${fmtBytes(maxBytes)}`));
+
+  function pick(f) {
+    if (!f) return;
+    result.hidden = true;
+    if (!/\.zip$/i.test(f.name)) { toast('Serve un file .zip', 'error'); return; }
+    if (f.size > maxBytes) { toast(`File troppo grande: il limite è ${fmtBytes(maxBytes)}`, 'error'); return; }
+    file = f;
+    fileInfo.hidden = false;
+    fileInfo.replaceChildren(icon('world'), h('span', { class: 'mono' }, f.name), h('span', { class: 'muted' }, fmtBytes(f.size)),
+      h('span', { class: 'spacer' }), btn('', { icon: 'x', kind: 'icon-only ghost', title: 'Rimuovi', onClick: clear }));
+    importBtn.disabled = false;
+  }
+
+  function clear() { file = null; fileInput.value = ''; fileInfo.hidden = true; importBtn.disabled = true; }
+
+  function doImport() {
+    if (!file) return;
+    importBtn.disabled = true;
+    progress.hidden = false;
+    result.hidden = true;
+    xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/servers/${s.id}/world/import`);
+    xhr.setRequestHeader('Content-Type', 'application/zip');
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const pct = (e.loaded / e.total) * 100;
+      progressFill.style.width = `${pct}%`;
+      progressText.textContent = pct >= 100 ? 'Estrazione e controllo del mondo…' : `${fmtBytes(e.loaded)} / ${fmtBytes(e.total)} · ${pct.toFixed(0)}%`;
+    };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* risposta non JSON */ }
+      xhr = null;
+      progress.hidden = true;
+      if (data.ok) {
+        showResult(data);
+        clear();
+        toast(`Mondo importato in ${s.name}`, 'success');
+      } else {
+        showError(data.error || `Errore HTTP`);
+        importBtn.disabled = false;
+      }
+      refreshServers();
+    };
+    xhr.onerror = () => { xhr = null; progress.hidden = true; importBtn.disabled = false; showError('Connessione interrotta durante il caricamento'); };
+    xhr.send(file);
+  }
+
+  function showResult(r) {
+    result.hidden = false;
+    result.className = 'world-result ok';
+    result.replaceChildren(
+      h('strong', {}, '✔ Mondo importato'),
+      h('ul', {},
+        h('li', {}, 'Formato: ', FORMAT_LABEL[r.format] || r.format),
+        h('li', {}, 'Cartelle: ', r.placed.map((p) => h('code', {}, p)).flatMap((c, i) => (i ? [', ', c] : [c]))),
+        r.backups.length > 0 && h('li', {}, 'Mondo precedente salvato in: ', r.backups.map((b) => h('code', {}, b)).flatMap((c, i) => (i ? [', ', c] : [c]))),
+        ...r.warnings.map((w) => h('li', { class: 'warn-text' }, w))),
+      h('p', { class: 'muted' }, 'Avvia il server per giocare sul mondo importato.'),
+      btn('Avvia ora', { icon: 'play', kind: 'primary small', onClick: () => { m.close(true); runAction(s, 'start'); } }));
+  }
+
+  function showError(msg) {
+    result.hidden = false;
+    result.className = 'world-result bad';
+    result.replaceChildren(h('strong', {}, '✖ Importazione non riuscita'), h('p', {}, msg));
+  }
+
+  function download() {
+    const a = h('a', { href: `/api/servers/${s.id}/world/export`, download: '' });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    toast(running ? 'Salvataggio del mondo e preparazione dello zip…' : 'Preparazione dello zip…');
+  }
+
+  const m = openModal(h('div', { class: 'dialog world-dialog' },
+    h('div', { class: 'row' }, icon('world'), h('h2', {}, `Mondo di ${s.name}`), h('span', { class: 'spacer' }),
+      btn('', { icon: 'x', kind: 'icon-only ghost', title: 'Chiudi', onClick: () => m.close() })),
+    h('p', {}, 'Cartella del mondo: ', h('code', {}, s.level), s.worldSplit ? h('span', { class: 'muted' }, ` (+ ${s.level}_nether e ${s.level}_the_end)`) : null),
+
+    h('section', { class: 'world-section' },
+      h('h3', {}, 'Importa un mondo'),
+      running
+        ? h('div', { class: 'notice' }, 'Il server è acceso: fermalo prima di importare un mondo, altrimenti verrebbe sovrascritto mentre è in uso. ',
+          btn('Ferma il server', { icon: 'stop', kind: 'small danger-soft', onClick: () => { m.close(true); runAction(s, 'stop'); } }))
+        : h('p', { class: 'muted' }, 'Uno zip con la cartella del mondo (quella che contiene level.dat), anche dentro altre cartelle. Va bene sia il formato Vanilla sia quello Paper: il manager lo adatta al tipo di server. Il mondo attuale non viene cancellato ma spostato in una cartella di backup.'),
+      drop, fileInput, fileInfo, progress,
+      h('div', { class: 'row end' }, importBtn),
+      result),
+
+    h('section', { class: 'world-section' },
+      h('h3', {}, 'Scarica il mondo'),
+      h('p', { class: 'muted' }, running
+        ? 'Il server viene salvato su disco prima di creare lo zip: il download contiene lo stato attuale del mondo.'
+        : 'Crea uno zip del mondo, utile come backup o per spostarlo su un altro server.'),
+      h('div', { class: 'row end' }, btn('Scarica .zip', { icon: 'download', onClick: download })))),
+  {
+    cls: 'small',
+    beforeClose: () => !xhr || confirm('Il caricamento è in corso: interromperlo?'),
+    onClose: () => { if (xhr) xhr.abort(); },
+  });
 }
 
 // ---------------------------------------------------------------------------

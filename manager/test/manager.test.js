@@ -120,3 +120,104 @@ test('elimina un server', async () => {
   assert.equal(res.status, 200);
   assert.equal(await byName('beta'), undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Mondi
+// ---------------------------------------------------------------------------
+
+const { execFileSync } = require('node:child_process');
+
+// Crea uno zip di prova con la struttura indicata ({ 'percorso/file': 'contenuto' }).
+function makeZip(name, files, { links = {} } = {}) {
+  const src = fs.mkdtempSync(path.join(tmp, 'zip-'));
+  for (const [rel, content] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(src, rel)), { recursive: true });
+    fs.writeFileSync(path.join(src, rel), content);
+  }
+  for (const [rel, target] of Object.entries(links)) fs.symlinkSync(target, path.join(src, rel));
+  const out = path.join(tmp, name);
+  execFileSync('zip', ['-r', '-q', '-y', out, '.'], { cwd: src });
+  return fs.readFileSync(out);
+}
+
+async function upload(id, buf) {
+  const res = await fetch(`${BASE}/api/servers/${id}/world/import`, { method: 'POST', headers: { Authorization: AUTH, 'Content-Type': 'application/zip' }, body: buf });
+  return { status: res.status, body: await res.json() };
+}
+
+test('importa un mondo vanilla annidato e fa il backup di quello esistente', async () => {
+  await api('POST', '/api/servers', { name: 'vanilla1', port: 25580, autoStart: false, env: { TYPE: 'VANILLA' } });
+  const s = await byName('vanilla1');
+  fs.mkdirSync(path.join(s.dataPath, 'world'), { recursive: true });
+  fs.writeFileSync(path.join(s.dataPath, 'world', 'level.dat'), 'vecchio');
+
+  const zip = makeZip('v.zip', {
+    'MioMondo/level.dat': 'nuovo',
+    'MioMondo/session.lock': 'x',
+    'MioMondo/region/r.0.0.mca': 'r',
+    'MioMondo/DIM-1/region/r.0.0.mca': 'n',
+  }, { links: { 'MioMondo/fuori': '/etc' } });
+  const res = await upload(s.id, zip);
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.format, 'vanilla');
+  assert.deepEqual(res.body.placed, ['world']);
+  assert.equal(res.body.backups.length, 1);
+  assert.equal(fs.readFileSync(path.join(s.dataPath, 'world', 'level.dat'), 'utf8'), 'nuovo');
+  assert.ok(fs.existsSync(path.join(s.dataPath, 'world', 'DIM-1', 'region', 'r.0.0.mca')));
+  assert.ok(!fs.existsSync(path.join(s.dataPath, 'world', 'session.lock')));
+  assert.ok(!fs.existsSync(path.join(s.dataPath, 'world', 'fuori')), 'i link simbolici vanno rimossi');
+  assert.equal(fs.readFileSync(path.join(s.dataPath, res.body.backups[0], 'level.dat'), 'utf8'), 'vecchio');
+  assert.ok(!fs.readdirSync(s.dataPath).some((f) => f.startsWith('.mcm-import-')), 'la cartella temporanea va eliminata');
+});
+
+const PAPER_WORLD = {
+  'world/level.dat': 'o',
+  'world_nether/level.dat': 'n',
+  'world_nether/DIM-1/region/r.0.0.mca': 'n',
+  'world_the_end/level.dat': 'e',
+  'world_the_end/DIM1/region/r.0.0.mca': 'e',
+};
+
+test('mondo Paper su server Paper: tre cartelle separate', async () => {
+  await api('POST', '/api/servers', { name: 'paper1', port: 25581, autoStart: false, env: { TYPE: 'PAPER', LEVEL: 'mappa' } });
+  const s = await byName('paper1');
+  const res = await upload(s.id, makeZip('p.zip', PAPER_WORLD));
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.format, 'paper');
+  assert.deepEqual(res.body.placed, ['mappa', 'mappa_nether', 'mappa_the_end']);
+  assert.ok(fs.existsSync(path.join(s.dataPath, 'mappa_nether', 'DIM-1', 'region', 'r.0.0.mca')));
+});
+
+test('mondo Paper su server Vanilla: Nether ed End rientrano nel mondo', async () => {
+  const s = await byName('vanilla1');
+  const res = await upload(s.id, makeZip('p2.zip', PAPER_WORLD));
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.deepEqual(res.body.placed, ['world']);
+  assert.ok(fs.existsSync(path.join(s.dataPath, 'world', 'DIM-1', 'region', 'r.0.0.mca')));
+  assert.ok(fs.existsSync(path.join(s.dataPath, 'world', 'DIM1', 'region', 'r.0.0.mca')));
+  assert.ok(res.body.warnings.some((w) => /convertito/.test(w)));
+});
+
+test('rifiuta zip senza mondo, file non zip e server acceso', async () => {
+  const s = await byName('vanilla1');
+  const noWorld = await upload(s.id, makeZip('n.zip', { 'readme.txt': 'ciao' }));
+  assert.equal(noWorld.status, 400);
+  assert.match(noWorld.body.error, /level\.dat/);
+  const notZip = await upload(s.id, Buffer.from('non sono uno zip'));
+  assert.equal(notZip.status, 400);
+  const running = await byName('alpha');
+  const busy = await upload(running.id, makeZip('r.zip', { 'w/level.dat': 'x' }));
+  assert.equal(busy.status, 409);
+});
+
+test('scarica il mondo come zip', async () => {
+  const s = await byName('paper1');
+  const res = await fetch(`${BASE}/api/servers/${s.id}/world/export`, { headers: { Authorization: AUTH } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-disposition'), /paper1-mappa-.*\.zip/);
+  const out = path.join(tmp, 'export.zip');
+  fs.writeFileSync(out, Buffer.from(await res.arrayBuffer()));
+  const list = execFileSync('unzip', ['-Z1', out], { encoding: 'utf8' });
+  assert.match(list, /^mappa\/level\.dat$/m);
+  assert.match(list, /^mappa_nether\/DIM-1\/region\/r\.0\.0\.mca$/m);
+});

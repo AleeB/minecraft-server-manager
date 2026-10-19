@@ -22,6 +22,8 @@ services:
       HEAP_SHARE: ${HEAP_SHARE:-0.8}
       RAM_BUDGET: ${RAM_BUDGET:-}
       RESTART_WARNING: ${RESTART_WARNING:-60}
+      WORLD_UPLOAD_MAX: ${WORLD_UPLOAD_MAX:-2g}
+      WORLD_EXTRACT_MAX: ${WORLD_EXTRACT_MAX:-20g}
       TZ: ${TZ:-Europe/Rome}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -40,6 +42,7 @@ services:
     environment:
       DOMAIN: ${DOMAIN:-}
       MANAGER_PORT: ${MANAGER_PORT:-8080}
+      WORLD_UPLOAD_MAX: ${WORLD_UPLOAD_MAX:-2g}
     entrypoint: ["sh", "/etc/nginx/mc/start.sh"]
     volumes:
       - ./nginx:/etc/nginx/mc:ro

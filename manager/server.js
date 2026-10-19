@@ -3,6 +3,9 @@
 // tramite il socket unix e serve il frontend statico in ./public.
 
 const http = require('http');
+const { spawn } = require('child_process');
+const { pipeline } = require('stream/promises');
+const { Transform } = require('stream');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -30,6 +33,12 @@ const HEAP_SHARE = Number(process.env.HEAP_SHARE) || 0.8;
 const RAM_BUDGET = process.env.RAM_BUDGET || '';
 const RESTART_WARNING_S = Math.max(5, Number(process.env.RESTART_WARNING) || 60);
 const MIN_HEAP_MB = 512;
+
+// Importazione/esportazione dei mondi
+const WORLD_UPLOAD_MAX = process.env.WORLD_UPLOAD_MAX || '2g';
+const WORLD_EXTRACT_MAX = process.env.WORLD_EXTRACT_MAX || '20g';
+// Server basati su Bukkit: Nether ed End stanno in cartelle separate (<mondo>_nether, <mondo>_the_end).
+const SPLIT_WORLD_TYPES = new Set(['PAPER', 'FOLIA', 'PURPUR', 'PUFFERFISH', 'LEAF', 'SPIGOT', 'BUKKIT', 'CANYON', 'MOHIST', 'ARCLIGHT', 'KETTING', 'MAGMA_MAINTAINED', 'YOUER', 'BANNER']);
 
 // ---------------------------------------------------------------------------
 // Docker
@@ -336,6 +345,9 @@ async function summarize(id) {
     pendingRestart: pending ? { at: pending.at, heapMB: pending.heapMB } : null,
     maxPlayers: env.MAX_PLAYERS || '',
     rconEnabled: env.ENABLE_RCON !== 'false' && env.ENABLE_RCON !== 'FALSE',
+    level: levelName(env),
+    worldSplit: SPLIT_WORLD_TYPES.has((env.TYPE || 'VANILLA').toUpperCase()),
+    importing: importingWorlds.has(name),
     env,
     userEnv,
     config,
@@ -539,6 +551,7 @@ async function createServer(cfg, emit) {
 // Avvio/riavvio di un server gestito: ricalcola la sua heap e, se cambia, ricrea il container.
 async function startManaged(id, restart, emit = () => {}) {
   const s = await summarize(id);
+  if (s.importing) throw httpError(409, `Importazione del mondo in corso su ${s.name}: aspetta che finisca.`);
   if (!s.managed || !s.config) {
     if (restart) return docker('POST', `/containers/${s.id}/restart?t=60`);
     return docker('POST', `/containers/${s.id}/start`).catch((e) => { if (e.status !== 304) throw e; });
@@ -581,6 +594,244 @@ async function deleteServer(id, removeData) {
     dataRemoved = true;
   }
   return { name: s.name, dataRemoved };
+}
+
+// ---------------------------------------------------------------------------
+// Mondi: importazione da .zip ed esportazione
+// ---------------------------------------------------------------------------
+
+const importingWorlds = new Set();
+
+function levelName(env) {
+  const l = String(env.LEVEL || 'world').trim();
+  return /^[\w][\w .-]{0,99}$/.test(l) && !l.includes('..') ? l : 'world';
+}
+
+function worldDirs(s) {
+  return s.worldSplit ? [s.level, `${s.level}_nether`, `${s.level}_the_end`] : [s.level];
+}
+
+function runCmd(cmd, args, { cwd, okCodes = [0] } = {}) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    p.on('error', (e) => reject(e.code === 'ENOENT' ? httpError(500, `Il comando "${cmd}" non è installato sul server del manager`) : e));
+    p.on('close', (code) => {
+      if (okCodes.includes(code)) return resolve(out);
+      const detail = (err || out).trim().split('\n').slice(-3).join(' ');
+      reject(httpError(400, `${cmd} non riuscito: ${detail || `codice ${code}`}`));
+    });
+  });
+}
+
+// Riceve il corpo della richiesta su file, interrompendo oltre il limite di dimensione.
+async function receiveFile(req, dest, maxBytes) {
+  let received = 0;
+  const limiter = new Transform({
+    transform(chunk, _enc, cb) {
+      received += chunk.length;
+      if (received > maxBytes) return cb(httpError(413, `File troppo grande: il limite è ${fmtMB(Math.round(maxBytes / 1024 ** 2))}`));
+      cb(null, chunk);
+    },
+  });
+  await pipeline(req, limiter, fs.createWriteStream(dest));
+  if (received === 0) throw httpError(400, 'Nessun file ricevuto');
+  return received;
+}
+
+// Uno zip può contenere link simbolici che puntano fuori dalla cartella: li eliminiamo tutti.
+function removeSymlinks(dir) {
+  let removed = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) { fs.unlinkSync(full); removed++; } else if (entry.isDirectory()) removed += removeSymlinks(full);
+  }
+  return removed;
+}
+
+// Cartelle che contengono level.dat (cioè mondi), fino a qualche livello di profondità.
+function findLevelDirs(dir, depth = 0, out = []) {
+  if (fs.existsSync(path.join(dir, 'level.dat'))) out.push({ dir, depth });
+  if (depth >= 5) return out;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name !== '__MACOSX') findLevelDirs(path.join(dir, entry.name), depth + 1, out);
+  }
+  return out;
+}
+
+function chownTree(p, uid, gid) {
+  fs.lchownSync(p, uid, gid);
+  if (!fs.lstatSync(p).isDirectory()) return;
+  for (const name of fs.readdirSync(p)) chownTree(path.join(p, name), uid, gid);
+}
+
+const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
+const timestamp = () => new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+
+async function importWorld(s, zipPath, workDir) {
+  const warnings = [];
+  const info = await runCmd('unzip', ['-Zt', zipPath]).catch(() => {
+    throw httpError(400, 'Il file non è uno .zip valido');
+  });
+  const total = Number((info.match(/([\d,]+) bytes uncompressed/) || [])[1]?.replace(/,/g, '') || 0);
+  if (total > parseSize(WORLD_EXTRACT_MAX)) {
+    throw httpError(413, `Lo zip estratto occuperebbe ${fmtMB(Math.round(total / 1024 ** 2))}, oltre il limite di ${WORLD_EXTRACT_MAX}`);
+  }
+
+  // I link simbolici non vengono estratti: uno zip potrebbe creare un link verso una cartella di sistema
+  // e poi scriverci attraverso. "unzip -Z" elenca le voci nello stesso ordine di "unzip -Z1".
+  const names = (await runCmd('unzip', ['-Z1', zipPath])).split('\n').filter(Boolean);
+  const details = (await runCmd('unzip', ['-Z', zipPath])).split('\n').filter(Boolean).slice(0, -1).slice(-names.length);
+  const links = details.length === names.length ? names.filter((_, i) => details[i].startsWith('l')) : [];
+  if (links.length) warnings.push(`Ignorati ${links.length} link simbolici presenti nello zip.`);
+
+  const extractDir = path.join(workDir, 'estratto');
+  fs.mkdirSync(extractDir);
+  // unzip rifiuta da solo i percorsi assoluti e con "..": il codice 1 indica solo avvisi.
+  const exclude = links.length ? ['-x', ...links.map((n) => n.replace(/([[\]*?\\])/g, '\\$1'))] : [];
+  await runCmd('unzip', ['-q', '-o', zipPath, '-d', extractDir, ...exclude], { okCodes: [0, 1, 11] });
+  fs.rmSync(zipPath, { force: true });
+  // Difesa ulteriore nel caso l'elenco non fosse affidabile.
+  removeSymlinks(extractDir);
+
+  const found = findLevelDirs(extractDir);
+  if (!found.length) throw httpError(400, 'Nello zip non c\'è nessun mondo: manca il file level.dat.');
+  const isDimension = (d) => /_(nether|the_end)$/.test(path.basename(d));
+  const main = (found.filter((f) => !isDimension(f.dir)).sort((a, b) => a.depth - b.depth)[0] || found[0]).dir;
+  if (found.filter((f) => !isDimension(f.dir) && f.dir !== main).length) {
+    warnings.push(`Lo zip contiene più mondi: importato "${path.relative(extractDir, main) || path.basename(main)}".`);
+  }
+
+  // Formato: Paper/Spigot ha <mondo>_nether/DIM-1 e <mondo>_the_end/DIM1 accanto; Vanilla li tiene dentro.
+  const base = path.basename(main);
+  const parent = path.dirname(main);
+  const paperNether = path.join(parent, `${base}_nether`);
+  const paperEnd = path.join(parent, `${base}_the_end`);
+  const hasPaperDims = isDir(path.join(paperNether, 'DIM-1')) || isDir(path.join(paperEnd, 'DIM1'));
+  const hasVanillaDims = isDir(path.join(main, 'DIM-1')) || isDir(path.join(main, 'DIM1'));
+  const format = hasPaperDims ? 'paper' : hasVanillaDims ? 'vanilla' : 'solo-overworld';
+
+  // Il mondo attuale non viene cancellato: finisce in una cartella di backup.
+  const stamp = timestamp();
+  const moved = []; // [cartella originale, backup]
+  for (const d of worldDirs(s)) {
+    const target = path.join(s.dataPath, d);
+    if (!fs.existsSync(target)) continue;
+    let backup = `${d}-backup-${stamp}`;
+    for (let i = 2; fs.existsSync(path.join(s.dataPath, backup)); i++) backup = `${d}-backup-${stamp}-${i}`;
+    fs.renameSync(target, path.join(s.dataPath, backup));
+    moved.push([d, backup]);
+  }
+  const backups = moved.map(([, b]) => b);
+
+  const levelDir = path.join(s.dataPath, s.level);
+  const placed = [s.level];
+  try {
+    placeWorld();
+  } catch (e) {
+    // Rimette a posto il mondo originale.
+    for (const d of worldDirs(s)) fs.rmSync(path.join(s.dataPath, d), { recursive: true, force: true });
+    for (const [d, b] of moved) fs.renameSync(path.join(s.dataPath, b), path.join(s.dataPath, d));
+    throw httpError(500, `Importazione non riuscita, mondo originale ripristinato: ${e.message}`);
+  }
+
+  function placeWorld() {
+    fs.renameSync(main, levelDir);
+    if (hasPaperDims) {
+      if (s.worldSplit) {
+        for (const [src, suffix] of [[paperNether, '_nether'], [paperEnd, '_the_end']]) {
+          if (isDir(src)) { fs.renameSync(src, path.join(s.dataPath, s.level + suffix)); placed.push(s.level + suffix); }
+        }
+      } else {
+        // Da Paper a Vanilla/Fabric/Forge: Nether ed End tornano dentro la cartella del mondo.
+        for (const [src, dim] of [[paperNether, 'DIM-1'], [paperEnd, 'DIM1']]) {
+          if (isDir(path.join(src, dim)) && !fs.existsSync(path.join(levelDir, dim))) fs.renameSync(path.join(src, dim), path.join(levelDir, dim));
+        }
+        warnings.push('Mondo in formato Paper convertito per questo tipo di server: Nether ed End sono stati spostati dentro la cartella del mondo.');
+      }
+    } else if (hasVanillaDims && s.worldSplit) {
+      const typeName = s.type.charAt(0) + s.type.slice(1).toLowerCase();
+    warnings.push(`Mondo in formato Vanilla: al primo avvio ${typeName} separerà da solo Nether ed End.`);
+    }
+    fs.rmSync(path.join(levelDir, 'session.lock'), { force: true });
+  }
+
+  // Il server nel container gira come UID/GID 1000 (o quelli impostati): i file devono essere suoi.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    const uid = Number(s.env.UID) || 1000;
+    const gid = Number(s.env.GID) || 1000;
+    for (const d of placed) chownTree(path.join(s.dataPath, d), uid, gid);
+  } else {
+    warnings.push('Il manager non gira come root: proprietario dei file non modificato.');
+  }
+
+  return { ok: true, format, placed, backups, warnings, bytes: total };
+}
+
+async function handleWorldImport(req, res, id) {
+  const s = await summarize(id);
+  if (!s.managed || !s.config || !s.dataPath) throw httpError(400, 'Si può importare un mondo solo nei server creati dal manager.');
+  if (isActive(s)) throw httpError(409, 'Ferma il server prima di importare un mondo.');
+  if (importingWorlds.has(s.name)) throw httpError(409, 'Un\'importazione è già in corso su questo server.');
+  const max = parseSize(WORLD_UPLOAD_MAX);
+  if (Number(req.headers['content-length'] || 0) > max) throw httpError(413, `File troppo grande: il limite è ${WORLD_UPLOAD_MAX}`);
+
+  importingWorlds.add(s.name);
+  const workDir = path.join(s.dataPath, `.mcm-import-${Date.now()}`);
+  try {
+    fs.mkdirSync(workDir, { recursive: true });
+    await receiveFile(req, path.join(workDir, 'mondo.zip'), max);
+    const result = await importWorld(s, path.join(workDir, 'mondo.zip'), workDir);
+    console.log(`[mondo] importato in ${s.name}: ${result.placed.join(', ')} (${result.format})`);
+    sendJson(res, 200, result);
+  } finally {
+    importingWorlds.delete(s.name);
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+async function handleWorldExport(req, res, id) {
+  const s = await summarize(id);
+  if (!s.dataPath || !isDir(s.dataPath)) throw httpError(400, 'Cartella dati del server non accessibile dal manager.');
+  const dirs = worldDirs(s).filter((d) => isDir(path.join(s.dataPath, d)));
+  if (!dirs.length) throw httpError(404, `Nessun mondo "${s.level}" da scaricare: avvia il server almeno una volta.`);
+
+  // A server acceso: salva tutto su disco e sospende i salvataggi mentre crea lo zip.
+  let resumeSaves = false;
+  if (isActive(s) && s.rconEnabled) {
+    try {
+      await execInContainer(s.id, ['rcon-cli', 'save-off']);
+      await execInContainer(s.id, ['rcon-cli', 'save-all flush']);
+      resumeSaves = true;
+    } catch { /* RCON non pronto: lo zip conterrà l'ultimo salvataggio automatico */ }
+  }
+  const resume = () => { if (resumeSaves) { resumeSaves = false; execInContainer(s.id, ['rcon-cli', 'save-on']).catch(() => {}); } };
+
+  const zip = spawn('zip', ['-r', '-q', '-', ...dirs, '-x', '*/session.lock'], { cwd: s.dataPath, stdio: ['ignore', 'pipe', 'pipe'] });
+  zip.on('error', (e) => {
+    resume();
+    if (!res.headersSent) sendJson(res, 500, { error: e.code === 'ENOENT' ? 'Il comando "zip" non è installato sul server del manager' : e.message });
+    else res.destroy();
+  });
+  zip.stdout.once('data', () => {
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${s.name}-${s.level.replace(/[^\w.-]/g, '_')}-${new Date().toISOString().slice(0, 10)}.zip"`,
+      'Cache-Control': 'no-store',
+    });
+  });
+  zip.stdout.pipe(res);
+  zip.on('close', (code) => {
+    resume();
+    if (code === 0) return;
+    console.error(`[mondo] zip di ${s.name} terminato con codice ${code}`);
+    if (!res.headersSent) sendJson(res, 500, { error: `Creazione dello zip non riuscita (codice ${code})` });
+    else res.destroy();
+  });
+  req.on('close', () => { if (zip.exitCode === null) zip.kill(); });
 }
 
 const ACTIONS = {
@@ -740,6 +991,7 @@ async function route(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const p = url.pathname;
   const m = p.match(/^\/api\/servers\/([^/]+)(?:\/([a-z]+))?$/);
+  const w = p.match(/^\/api\/servers\/([^/]+)\/world\/(import|export)$/);
 
   if (!p.startsWith('/api/')) return serveStatic(req, res, p);
 
@@ -765,7 +1017,7 @@ async function route(req, res) {
         memory = { budgetMB: plan.budget, fixedMB: plan.fixed, requestedMB: plan.requested, usedMB: plan.fixed + plan.flex.reduce((a, f) => a + f.cur, 0), restartWarningS: RESTART_WARNING_S };
       } catch { /* ignora */ }
     }
-    return sendJson(res, 200, { docker: dockerInfo, dockerError, memory, socket: findSocket(), serversDir: SERVERS_DIR, image: IMAGE, localTags: images });
+    return sendJson(res, 200, { docker: dockerInfo, dockerError, memory, socket: findSocket(), serversDir: SERVERS_DIR, worldUploadMax: parseSize(WORLD_UPLOAD_MAX), image: IMAGE, localTags: images });
   }
 
   if (req.method === 'GET' && p === '/api/servers') return sendJson(res, 200, await listServers());
@@ -796,6 +1048,9 @@ async function route(req, res) {
     }));
     return sendJson(res, 200, { results });
   }
+
+  if (w && w[2] === 'import' && req.method === 'POST') return handleWorldImport(req, res, decodeURIComponent(w[1]));
+  if (w && w[2] === 'export' && req.method === 'GET') return handleWorldExport(req, res, decodeURIComponent(w[1]));
 
   if (m) {
     const id = decodeURIComponent(m[1]);
@@ -860,6 +1115,9 @@ const server = http.createServer((req, res) => {
     sendJson(res, e.status || 500, { error: e.message });
   });
 });
+
+// I caricamenti dei mondi possono durare molto: niente limite di tempo sulla singola richiesta.
+server.requestTimeout = 0;
 
 server.listen(PORT, HOST, () => {
   console.log(`Minecraft Server Manager → http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);

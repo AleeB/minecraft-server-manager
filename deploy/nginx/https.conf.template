@@ -30,7 +30,9 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy same-origin always;
 
-    client_max_body_size 10m;
+    # Caricamento dei mondi: stesso limite del manager, inoltrato in streaming senza copia su disco.
+    client_max_body_size ${WORLD_UPLOAD_MAX};
+    proxy_request_buffering off;
 
     location / {
         proxy_pass http://127.0.0.1:${MANAGER_PORT};

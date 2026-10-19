@@ -6,7 +6,8 @@ set -eu
 
 : "${DOMAIN:?Imposta DOMAIN in .env}"
 : "${MANAGER_PORT:=8080}"
-export DOMAIN MANAGER_PORT
+: "${WORLD_UPLOAD_MAX:=2g}"
+export DOMAIN MANAGER_PORT WORLD_UPLOAD_MAX
 
 TEMPLATES=/etc/nginx/mc
 CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
@@ -14,7 +15,7 @@ CONF=/etc/nginx/conf.d/default.conf
 
 render() {
   if [ -f "$CERT" ]; then mode=https; else mode=http; fi
-  envsubst '${DOMAIN} ${MANAGER_PORT}' < "$TEMPLATES/$mode.conf.template" > "$CONF.new"
+  envsubst '${DOMAIN} ${MANAGER_PORT} ${WORLD_UPLOAD_MAX}' < "$TEMPLATES/$mode.conf.template" > "$CONF.new"
   # Senza IPv6 sull'host, "listen [::]" impedirebbe a nginx di partire.
   if [ ! -f /proc/net/if_inet6 ]; then sed -i '/listen \[::\]/d' "$CONF.new"; fi
   mv "$CONF.new" "$CONF"

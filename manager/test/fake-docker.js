@@ -25,7 +25,8 @@ function startFakeDocker(socketPath, { memTotal = 6 * 1024 ** 3 } = {}) {
     Id: c.Id, Name: c.Name, Image: 'sha256:fake', RestartCount: 0,
     State: { Status: c.status, StartedAt: new Date().toISOString(), ExitCode: 0 },
     Config: { Env: c.Env, Labels: c.Labels, Image: 'itzg/minecraft-server:latest', Tty: true },
-    HostConfig: c.HostConfig, Mounts: [],
+    HostConfig: c.HostConfig,
+    Mounts: (c.HostConfig.Binds || []).map((b) => { const [Source, Destination] = b.split(':'); return { Source, Destination }; }),
   });
 
   const server = http.createServer((req, res) => {

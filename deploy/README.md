@@ -152,6 +152,9 @@ docker compose up -d certbot
 
 Verifica del rinnovo: `docker compose exec certbot certbot renew --dry-run --webroot -w /var/www/certbot`.
 
+nginx accetta caricamenti fino a `WORLD_UPLOAD_MAX` (default `2g`), lo stesso limite del manager per l'importazione
+dei mondi, e li inoltra al manager in streaming. Se cambi il valore in `.env`, rilancia `./update.sh`.
+
 ## Tornare a una versione precedente
 
 Ogni immagine su GHCR è taggata con il commit. In `/opt/mc-manager/deploy`:

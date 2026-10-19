@@ -25,6 +25,8 @@ Poi apri http://localhost:8080.
 | `HEAP_SHARE`  | `0.8`                      | Quota della RAM restante usabile come heap Java |
 | `RAM_BUDGET`  | calcolato                  | Forza il budget heap totale (es. `6g`)       |
 | `RESTART_WARNING` | `60`                   | Secondi di preavviso prima del riavvio per la RAM |
+| `WORLD_UPLOAD_MAX` | `2g`                  | Dimensione massima dello .zip di un mondo da importare |
+| `WORLD_EXTRACT_MAX` | `20g`                | Spazio massimo occupato dallo zip una volta estratto |
 
 ## Funzioni
 
@@ -39,6 +41,11 @@ Poi apri http://localhost:8080.
   in proporzione. Il server che parte riceve subito la sua quota. Quelli già accesi che devono scendere
   ricevono un conto alla rovescia in chat e vengono riavviati con la nuova heap. Quando un server si ferma,
   gli altri riprendono la RAM richiesta al loro prossimo avvio o riavvio.
+- **Mondo**: dal pulsante 🌐 sulla card, a server fermo, importi un mondo da uno `.zip` trascinandolo nel browser.
+  Il manager trova da solo la cartella con `level.dat`, riconosce il formato Vanilla o Paper e lo adatta al tipo di
+  server. Il mondo precedente finisce in una cartella `<mondo>-backup-<data>` e i file vengono assegnati all'utente
+  del server (UID 1000). Dallo stesso pannello scarichi il mondo come `.zip`: a server acceso viene prima salvato
+  (`save-all`). Richiede i comandi `zip` e `unzip`, già inclusi nell'immagine Docker.
 - **Console**: log in tempo reale, comandi via RCON con cronologia, comandi rapidi e lista dei giocatori online.
 - **Anteprima docker-compose** della configurazione.
 
